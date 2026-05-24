@@ -7,7 +7,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { inferMimeTypeFromPath, IMAGE_PIPELINE_DISABLED } from "../src/images.js";
+import { inferMimeTypeFromPath, IMAGE_PIPELINE_DISABLED, redactErrorBody } from "../src/images.js";
 
 // ─── inferMimeTypeFromPath ────────────────────────────────────────────────────
 
@@ -150,5 +150,38 @@ describe("upgradeGgDlUrlsFromRedirects — when IMAGE_PIPELINE_DISABLED is true"
 
     const out = await upgradeGgDlUrlsFromRedirects(cfg, input);
     assert.deepEqual(out, input);
+  });
+});
+
+// ─── redactErrorBody ──────────────────────────────────────────────────────────
+
+describe("redactErrorBody", () => {
+  it("replaces known SID cookie patterns", () => {
+    const body = "error: SID=g.a000xyz1234567890abcdef; NID=531=somevalue";
+    const out = redactErrorBody(body);
+    assert.ok(!out.includes("g.a000xyz1234567890abcdef"), "raw SID value must be redacted");
+    assert.ok(out.includes("SID=[redacted]"), "SID key must be preserved with redacted marker");
+  });
+
+  it("replaces bare long base64-ish tokens", () => {
+    const token = "AAVLpEg4wc15rqCdGoNUMYoQMqwQsGIfvKfH8FZfzna";
+    const body = `upload_id=${token}&other=x`;
+    const out = redactErrorBody(body);
+    assert.ok(!out.includes(token), "long token must be redacted");
+  });
+
+  it("preserves short values and plain text", () => {
+    const body = "Not found";
+    assert.equal(redactErrorBody(body), "Not found");
+  });
+
+  it("truncates to maxLen", () => {
+    const body = "x".repeat(1000);
+    assert.ok(redactErrorBody(body, 100).length <= 100);
+  });
+
+  it("does not throw on empty string", () => {
+    assert.doesNotThrow(() => redactErrorBody(""));
+    assert.equal(redactErrorBody(""), "");
   });
 });

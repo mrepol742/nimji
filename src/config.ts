@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import stripJsonComments from "strip-json-comments";
 import { resolveAppHomeDir } from "./paths.js";
@@ -53,6 +53,8 @@ function mergeNestedEnvFromObject(obj: unknown): void {
   }
 }
 
+const MAX_CONFIG_FILE_BYTES = 256 * 1024; // 256 KiB
+
 let configMergeDone = false;
 let lastMergedConfigPath: string | null = null;
 
@@ -85,6 +87,8 @@ export function mergeProjectConfigIntoEnv(cwd: string = process.cwd()): string |
     if (!existsSync(filePath)) continue;
 
     try {
+      const stat = statSync(filePath);
+      if (stat.size > MAX_CONFIG_FILE_BYTES) continue; // skip oversized files silently
       const raw = readFileSync(filePath, "utf8");
       const stripped = stripJsonComments(raw, { whitespace: false });
       const parsed: unknown = JSON.parse(stripped);
@@ -166,6 +170,11 @@ function loadKeepaliveBatchexecute(cwd: string, pick: ConfigPick): KeepaliveBatc
 
   if (freqPath) {
     const abs = path.isAbsolute(freqPath) ? freqPath : path.resolve(cwd, freqPath);
+    // Reject paths that escape cwd to prevent reading arbitrary files via ../../ traversal
+    const safeRoot = path.resolve(cwd) + path.sep;
+    if (!abs.startsWith(safeRoot) && abs !== path.resolve(cwd)) {
+      throw new Error(`KEEPALIVE_F_REQ_PATH must be inside the project directory: ${abs}`);
+    }
     if (!existsSync(abs)) {
       throw new Error(`KEEPALIVE_F_REQ_PATH not found: ${abs}`);
     }

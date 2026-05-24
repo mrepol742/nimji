@@ -5,6 +5,22 @@ import { buildSecChUaHeaders } from "./transport.js";
 import type { GemaiConfig, GemaiHooks, ImageAttachment } from "./types.js";
 
 /**
+ * Strip patterns that look like session cookies, auth tokens, or SID values from an HTTP
+ * error body before the message is surfaced in thrown errors or CLI output.
+ * Matches: `key=<base64/alphanum value>` pairs and bare long base64-ish strings (≥ 32 chars).
+ */
+export function redactErrorBody(raw: string, maxLen = 300): string {
+  return raw
+    .slice(0, maxLen * 4) // work on a reasonable prefix before regex
+    .replace(
+      /\b(SID|PSID|SSID|APISID|SAPISID|HSID|NID|AEC|SIDCC|ENID|BUCKET)[^;,\s"]{8,}/gi,
+      "$1=[redacted]",
+    )
+    .replace(/\b[\w-]{32,}={0,2}\b/g, "[redacted]")
+    .slice(0, maxLen);
+}
+
+/**
  * When `true`, skips lh3 redirect chasing / downloads / ImgBB while still surfacing URLs from streams.
  * Set env `IMAGE_PIPELINE_ENABLED=1` to enable, or flip the default here once your session is confirmed.
  */
@@ -396,7 +412,7 @@ export async function uploadImageToGemini(
 
   if (!startRes.ok) {
     const body = await startRes.text();
-    throw new Error(`Gemini upload start failed (${startRes.status}): ${body.slice(0, 400)}`);
+    throw new Error(`Gemini upload start failed (${startRes.status}): ${redactErrorBody(body)}`);
   }
 
   // The server echoes back the full upload URL including server-assigned upload_id
@@ -423,7 +439,7 @@ export async function uploadImageToGemini(
 
   if (!finalRes.ok) {
     throw new Error(
-      `Gemini upload finalize failed (${finalRes.status}): ${finalBody.slice(0, 400)}`,
+      `Gemini upload finalize failed (${finalRes.status}): ${redactErrorBody(finalBody)}`,
     );
   }
 
@@ -431,7 +447,7 @@ export async function uploadImageToGemini(
   const tokenMatch = /\/contrib_service\/ttl_\d+[dhms]?\/([A-Za-z0-9_-]+)/.exec(finalBody);
   if (!tokenMatch) {
     throw new Error(
-      `Could not extract contrib token from upload response: ${finalBody.slice(0, 400)}`,
+      `Could not extract contrib token from upload response: ${redactErrorBody(finalBody)}`,
     );
   }
 

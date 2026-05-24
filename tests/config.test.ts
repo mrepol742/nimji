@@ -279,3 +279,123 @@ describe("mergeProjectConfigIntoEnv — JSON config file", () => {
     assert.equal(process.env.__NIMJI_TEST_KEY__, "first-merge");
   });
 });
+
+// ─── S3: mergeProjectConfigIntoEnv — oversized file guard ────────────────────
+
+describe("mergeProjectConfigIntoEnv — oversized config file is skipped", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    resetProjectConfigMergeCache();
+    tmpDir = await (async () => {
+      const d = path.join(
+        os.tmpdir(),
+        `nimji-test-s3-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      );
+      await mkdir(d, { recursive: true });
+      return d;
+    })();
+  });
+
+  afterEach(async () => {
+    resetProjectConfigMergeCache();
+    delete process.env.__NIMJI_S3_KEY__;
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("skips a config file that exceeds 256 KiB and returns null", async () => {
+    // Write a file just over 256 KiB; pad with spaces so it stays valid JSON
+    const base = JSON.stringify({ __NIMJI_S3_KEY__: "should-not-appear" });
+    const padding = " ".repeat(256 * 1024 + 1 - base.length);
+    // The padding is outside the JSON value so the whole thing is valid JSON wrapped in an object
+    // Actually we just need the file to be > 256KiB; content validity doesn't matter since it's skipped
+    const bigContent = base + padding;
+    await writeFile(path.join(tmpDir, "config.jsonc"), bigContent, "utf8");
+    const result = mergeProjectConfigIntoEnv(tmpDir);
+    assert.equal(result, null, "oversized file should be skipped, returning null");
+    assert.equal(
+      process.env.__NIMJI_S3_KEY__,
+      undefined,
+      "env key must not be set from oversized file",
+    );
+  });
+
+  it("accepts a config file just under 256 KiB", async () => {
+    const base = JSON.stringify({ __NIMJI_S3_KEY__: "under-limit" });
+    // No padding needed — a normal small file is well under the cap
+    await writeFile(path.join(tmpDir, "config.jsonc"), base, "utf8");
+    mergeProjectConfigIntoEnv(tmpDir);
+    assert.equal(process.env.__NIMJI_S3_KEY__, "under-limit");
+  });
+});
+
+// ─── S2: KEEPALIVE_F_REQ_PATH — path traversal guard ─────────────────────────
+
+describe("loadConfigFromEnv — KEEPALIVE_F_REQ_PATH path traversal guard", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    resetProjectConfigMergeCache();
+    tmpDir = await (async () => {
+      const d = path.join(
+        os.tmpdir(),
+        `nimji-test-s2-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      );
+      await mkdir(d, { recursive: true });
+      return d;
+    })();
+  });
+
+  afterEach(async () => {
+    resetProjectConfigMergeCache();
+    await rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("throws when KEEPALIVE_F_REQ_PATH escapes the cwd via ..", async () => {
+    // Write a dummy JSON file one level above tmpDir that we try to escape to
+    const outsideFile = path.join(os.tmpdir(), `nimji-escape-target-${Date.now()}.json`);
+    await writeFile(outsideFile, '[[["aPya6c","payload"]]]', "utf8");
+
+    try {
+      assert.throws(
+        () =>
+          loadConfigFromEnv({
+            cwd: tmpDir,
+            overrides: {
+              COOKIES: "c",
+              AT_TOKEN: "t",
+              F_SID: "f",
+              KEEPALIVE_F_REQ_PATH: path.relative(tmpDir, outsideFile),
+            },
+          }),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.ok(
+            err.message.includes("must be inside the project directory"),
+            `unexpected message: ${err.message}`,
+          );
+          return true;
+        },
+      );
+    } finally {
+      await rm(outsideFile, { force: true });
+    }
+  });
+
+  it("accepts a KEEPALIVE_F_REQ_PATH that is inside cwd", async () => {
+    const innerFile = path.join(tmpDir, "keepalive.json");
+    await writeFile(innerFile, '[[["aPya6c","payload"]]]', "utf8");
+
+    assert.doesNotThrow(() =>
+      loadConfigFromEnv({
+        cwd: tmpDir,
+        overrides: {
+          COOKIES: "c",
+          AT_TOKEN: "t",
+          F_SID: "f",
+          KEEPALIVE_F_REQ_PATH: innerFile,
+        },
+      }),
+    );
+  });
+});
