@@ -1,4 +1,4 @@
-/* global chrome, document, navigator */
+/* global chrome, document, navigator, console */
 
 const statusEl = document.getElementById("status");
 const atTokenStateEl = document.getElementById("atTokenState");
