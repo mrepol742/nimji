@@ -9,6 +9,7 @@ import {
   runBatchexecuteKeepalive,
 } from "./transport.js";
 import { extractResponse, sortStableGoogleImageUrls } from "./parser.js";
+import { downloadImages, upgradeGgDlUrlsFromRedirects } from "./images.js";
 import type {
   CandidateScore,
   ClientOptions,
@@ -80,7 +81,12 @@ export function createClient(
       : cfg.runtime.streamMaxDurationMs;
 
     const requestPath = buildStreamGeneratePath(requestConfig);
-    const requestBody = buildPayload(requestConfig, options.prompt, conversation);
+    const requestBody = buildPayload(
+      requestConfig,
+      options.prompt,
+      conversation,
+      options.imageAttachment,
+    );
     await hooks?.onRequest?.({ prompt: options.prompt, path: requestPath, body: requestBody });
 
     const client = new Client("https://gemini.google.com", {
@@ -116,7 +122,9 @@ export function createClient(
       const chunks = parseStreamChunks(raw);
       const extracted = extractResponse(chunks, raw);
 
-      const resolvedImageUrls = sortStableGoogleImageUrls([...extracted.imageUrls]);
+      // Upgrade gg-dl redirect tokens → rd-gg stable paths before download attempts
+      const upgradedUrls = await upgradeGgDlUrlsFromRedirects(requestConfig, extracted.imageUrls);
+      const resolvedImageUrls = sortStableGoogleImageUrls(upgradedUrls);
 
       if (extracted.conversation.conversationId) {
         conversation = {
@@ -127,11 +135,24 @@ export function createClient(
       }
       await hooks?.onCandidates?.(extracted.candidates as CandidateScore[]);
 
+      // Download images (and optionally upload to ImgBB) while rd-gg URLs are still fresh
+      const outputDir = options.imageOutputDir ?? "./output-images";
+      const { savedPaths, uploadedUrls } =
+        (saveImages || wantsUpload) && resolvedImageUrls.length > 0
+          ? await downloadImages(
+              requestConfig,
+              resolvedImageUrls,
+              outputDir,
+              { saveFiles: saveImages, uploadToImgBB: wantsUpload },
+              hooks,
+            )
+          : { savedPaths: [], uploadedUrls: [] };
+
       return ok({
         text: extracted.text,
         imageUrls: includeImages ? [...resolvedImageUrls] : [],
-        savedImagePaths: [],
-        uploadedImageUrls: [],
+        savedImagePaths: savedPaths,
+        uploadedImageUrls: uploadedUrls,
         conversation: { ...conversation },
         meta: {
           statusCode,

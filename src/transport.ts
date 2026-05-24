@@ -1,5 +1,5 @@
 import { Client } from "undici";
-import type { ConversationState, GemaiConfig, Result } from "./types.js";
+import type { ConversationState, GemaiConfig, ImageAttachment, Result } from "./types.js";
 import { fail, ok } from "./types.js";
 
 /** Builds `/assistant.lamda.BardFrontendService/StreamGenerate` URL + query string. */
@@ -202,10 +202,29 @@ export function buildPayload(
   config: GemaiConfig,
   prompt: string,
   conversation?: ConversationState,
+  imageAttachment?: ImageAttachment,
 ): string {
   const activeConversation = conversation ?? config.conversation ?? {};
+
+  // When an image is attached the first slot in the inner array encodes it as:
+  // [prompt, 0, null, [[[tokenPath, 1, null, mimeType], fileName]]]
+  // This matches the f.req shape captured in Gemini DevTools when a file is attached.
+  const promptSlot = imageAttachment
+    ? [
+        prompt,
+        0,
+        null,
+        [
+          [
+            [imageAttachment.tokenPath, 1, null, imageAttachment.mimeType],
+            imageAttachment.fileName,
+          ],
+        ],
+      ]
+    : [prompt, 0, null, null, null, null, 0];
+
   const inner = JSON.stringify([
-    [prompt, 0, null, null, null, null, 0],
+    promptSlot,
     [config.context.language],
     [
       activeConversation.conversationId ?? "",
@@ -342,29 +361,49 @@ export async function readStreamWithTimeouts(
 ): Promise<Buffer> {
   const chunks: Buffer[] = [];
   const iterator = body[Symbol.asyncIterator]();
-  const startedAt = Date.now();
 
-  while (Date.now() - startedAt < maxDurationMs) {
-    const timeoutPromise = new Promise<"timeout">((resolve) => {
-      setTimeout(() => resolve("timeout"), idleTimeoutMs);
-    });
+  let maxTimer: ReturnType<typeof setTimeout> | undefined;
+  let maxFired = false;
+  const maxPromise = new Promise<"max">((resolve) => {
+    maxTimer = setTimeout(() => {
+      maxFired = true;
+      resolve("max");
+    }, maxDurationMs);
+  });
 
-    const result = await Promise.race([iterator.next(), timeoutPromise]);
-    if (result === "timeout") {
-      onIdle?.(idleTimeoutMs);
-      break;
+  try {
+    while (true) {
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      const idlePromise = new Promise<"idle">((resolve) => {
+        idleTimer = setTimeout(() => resolve("idle"), idleTimeoutMs);
+      });
+
+      const result = await Promise.race([iterator.next(), idlePromise, maxPromise]);
+      clearTimeout(idleTimer);
+
+      if (result === "max") {
+        onMax?.(maxDurationMs);
+        break;
+      }
+
+      if (result === "idle") {
+        onIdle?.(idleTimeoutMs);
+        break;
+      }
+
+      if (result.done) break;
+      chunks.push(Buffer.isBuffer(result.value) ? result.value : Buffer.from(result.value));
+
+      if (maxFired) {
+        onMax?.(maxDurationMs);
+        break;
+      }
     }
-
-    if (result.done) break;
-    chunks.push(Buffer.isBuffer(result.value) ? result.value : Buffer.from(result.value));
+  } finally {
+    clearTimeout(maxTimer);
+    const destroyable = body as unknown as { destroy?: () => void };
+    if (typeof destroyable.destroy === "function") destroyable.destroy();
   }
-
-  if (Date.now() - startedAt >= maxDurationMs) {
-    onMax?.(maxDurationMs);
-  }
-
-  const destroyable = body as unknown as { destroy?: () => void };
-  if (typeof destroyable.destroy === "function") destroyable.destroy();
 
   return Buffer.concat(chunks);
 }

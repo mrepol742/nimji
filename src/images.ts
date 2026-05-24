@@ -1,14 +1,14 @@
 import { fetch } from "undici";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { buildSecChUaHeaders } from "./transport.js";
-import type { GemaiConfig, GemaiHooks } from "./types.js";
+import type { GemaiConfig, GemaiHooks, ImageAttachment } from "./types.js";
 
 /**
  * When `true`, skips lh3 redirect chasing / downloads / ImgBB while still surfacing URLs from streams.
- * Flip to `false` after confirming cookie + header profiles work for your session.
+ * Set env `IMAGE_PIPELINE_ENABLED=1` to enable, or flip the default here once your session is confirmed.
  */
-export const IMAGE_PIPELINE_DISABLED = true;
+export const IMAGE_PIPELINE_DISABLED = process.env.IMAGE_PIPELINE_ENABLED !== "1";
 
 const GOOGLEBOT_IMAGE_UA =
   "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)";
@@ -316,4 +316,125 @@ export async function downloadImages(
     savedPaths: perUrl.flatMap((item) => (item?.savedPath ? [item.savedPath] : [])),
     uploadedUrls: perUrl.flatMap((item) => (item?.uploadedUrl ? [item.uploadedUrl] : [])),
   };
+}
+
+const KNOWN_MIME_TYPES: Readonly<Record<string, string>> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".svg": "image/svg+xml",
+  ".bmp": "image/bmp",
+  ".tiff": "image/tiff",
+  ".tif": "image/tiff",
+};
+
+export function inferMimeTypeFromPath(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  return KNOWN_MIME_TYPES[ext] ?? "application/octet-stream";
+}
+
+/**
+ * Uploads a local image file to the Gemini `/upload/` endpoint and returns an
+ * `ImageAttachment` with the contribution token path, MIME type, and filename.
+ *
+ * The upload follows the two-step resumable-upload protocol captured in
+ * Gemini DevTools traffic:
+ *   1. POST `/_/upload/BardChatUi/data?upload_id=…&upload_protocol=resumable`
+ *      with `X-Goog-Upload-Protocol: resumable` + `X-Goog-Upload-Command: start`
+ *   2. POST same URL with `X-Goog-Upload-Command: upload, finalize` + raw bytes
+ *
+ * On success the finalize response body contains a JSON fragment with the
+ * `/contrib_service/ttl_1d/<token>` path we embed in the StreamGenerate payload.
+ */
+export async function uploadImageToGemini(
+  config: GemaiConfig,
+  filePath: string,
+): Promise<ImageAttachment> {
+  const fileName = path.basename(filePath);
+  const mimeType = inferMimeTypeFromPath(filePath);
+  const fileBytes = await readFile(filePath);
+  const fileSize = fileBytes.length;
+
+  // Shared headers matching the real browser upload traffic to push.clients6.google.com
+  const baseHeaders: Record<string, string> = {
+    accept: "*/*",
+    "accept-language": config.context.acceptLanguage,
+    cookie: config.auth.cookies,
+    origin: "https://gemini.google.com",
+    priority: "u=1, i",
+    "push-id": "feeds/mcudyrk2a4khkz",
+    referer: "https://gemini.google.com/",
+    ...buildSecChUaHeaders(config),
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-site",
+    "user-agent": config.context.userAgent,
+    "x-browser-channel": config.context.browserChannel,
+    "x-browser-copyright": config.context.browserCopyright,
+    "x-browser-validation": config.context.browserValidation,
+    "x-browser-year": "2026",
+    "x-client-data": config.context.clientData,
+    "x-tenant-id": "bard-storage",
+  };
+
+  // Step 1 — POST to push.clients6.google.com/upload/ with x-goog-upload-command: start
+  // The server returns an x-goog-upload-url header containing the upload_id for step 2.
+  const startUrl = "https://push.clients6.google.com/upload/?upload_protocol=resumable";
+  const startRes = await fetch(startUrl, {
+    method: "POST",
+    headers: {
+      ...baseHeaders,
+      "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+      "x-goog-upload-command": "start",
+      "x-goog-upload-header-content-length": String(fileSize),
+      "x-goog-upload-protocol": "resumable",
+    },
+    body: `File name: ${fileName}`,
+  });
+
+  if (!startRes.ok) {
+    const body = await startRes.text();
+    throw new Error(`Gemini upload start failed (${startRes.status}): ${body.slice(0, 400)}`);
+  }
+
+  // The server echoes back the full upload URL including server-assigned upload_id
+  const uploadUrl = startRes.headers.get("x-goog-upload-url");
+  await startRes.arrayBuffer(); // drain body
+
+  if (!uploadUrl) {
+    throw new Error("Gemini upload start did not return x-goog-upload-url");
+  }
+
+  // Step 2 — POST raw bytes to the server-provided upload URL
+  const finalRes = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      ...baseHeaders,
+      "content-type": "application/x-www-form-urlencoded;charset=utf-8",
+      "x-goog-upload-command": "upload, finalize",
+      "x-goog-upload-offset": "0",
+    },
+    body: fileBytes,
+  });
+
+  const finalBody = await finalRes.text();
+
+  if (!finalRes.ok) {
+    throw new Error(
+      `Gemini upload finalize failed (${finalRes.status}): ${finalBody.slice(0, 400)}`,
+    );
+  }
+
+  // The response contains a token path of the form /contrib_service/ttl_1d/<token>
+  const tokenMatch = /\/contrib_service\/ttl_\d+[dhms]?\/([A-Za-z0-9_-]+)/.exec(finalBody);
+  if (!tokenMatch) {
+    throw new Error(
+      `Could not extract contrib token from upload response: ${finalBody.slice(0, 400)}`,
+    );
+  }
+
+  const tokenPath = tokenMatch[0];
+  return { tokenPath, mimeType, fileName };
 }

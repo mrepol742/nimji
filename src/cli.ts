@@ -7,11 +7,11 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { fileURLToPath } from "node:url";
 import { createClient } from "./client.js";
-import { IMAGE_PIPELINE_DISABLED } from "./images.js";
+import { IMAGE_PIPELINE_DISABLED, inferMimeTypeFromPath, uploadImageToGemini } from "./images.js";
 import { loadConfigFromEnv, mergeProjectConfigIntoEnv, validateConfig } from "./config.js";
 import { resolveAppHomeDir } from "./paths.js";
 import { createSessionStore } from "./session.js";
-import type { GemaiClient, GemaiHooks, GenerateResult, Result } from "./types.js";
+import type { GemaiClient, GemaiHooks, GenerateResult, ImageAttachment, Result } from "./types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -192,6 +192,8 @@ function printHelp(): void {
   console.log("");
   console.log("Shared flags:");
   console.log("  --image                     Extra retries for image-style prompts");
+  console.log("  --input-image <path>        Attach a local image file to the prompt");
+  console.log("                              Auto-detected when prompt ends with an image path");
   console.log("  --no-save-images            Skip disk (with --image)");
   console.log("  --save-images               Always save images");
   console.log("  --upload, --upload-images   ImgBB upload when IMG_BB_API_KEY is set");
@@ -208,7 +210,7 @@ function printHelp(): void {
   console.log("");
   console.log("Environment (required): COOKIES, AT_TOKEN, F_SID");
   console.log(
-    "Optional: MODEL (auto | paste full boq_* bl string), BL_PARAM (overrides MODEL), USER_AGENT, NIMJI_HOME (fallback GEMAI_HOME), NIMJI_CONFIG (fallback GEMAI_CONFIG), UI_DENSITY, UI_ANSWER_STYLE, DEBUG_CANDIDATES=1, NO_COLOR, FORCE_COLOR",
+    "Optional: MODEL (auto | paste full boq_* bl string), BL_PARAM (overrides MODEL), USER_AGENT, NIMJI_HOME (fallback GEMAI_HOME), NIMJI_CONFIG (fallback GEMAI_CONFIG), UI_DENSITY, UI_ANSWER_STYLE, DEBUG_CANDIDATES=1, IMAGE_PIPELINE_ENABLED=1 (enable image download/save), NO_COLOR, FORCE_COLOR",
   );
   console.log(
     "Keepalive extras: KEEPALIVE_RPC, KEEPALIVE_F_REQ_PATH | KEEPALIVE_F_REQ, KEEPALIVE_INNER_PAYLOAD, KEEPALIVE_GOOG_EXT_525001261_JSPB",
@@ -244,6 +246,7 @@ async function runGenerateWithRetry(
   noRetry: boolean,
   allowSessionRecovery: boolean,
   maxRetries: number,
+  imageAttachment?: ImageAttachment,
 ): Promise<{
   result: Result<GenerateResult>;
   issue: ResponseIssue;
@@ -258,6 +261,7 @@ async function runGenerateWithRetry(
     includeImages: true,
     saveImages,
     uploadImages,
+    imageAttachment,
   });
   if (!result.ok) {
     return {
@@ -309,6 +313,7 @@ async function runGenerateWithRetry(
       includeImages: true,
       saveImages,
       uploadImages,
+      imageAttachment,
     });
     usedRetry = true;
 
@@ -352,6 +357,7 @@ async function runGenerateWithRetry(
       includeImages: true,
       saveImages,
       uploadImages,
+      imageAttachment,
     });
     if (recovered.ok) {
       issue = classifyResponse(recovered.value);
@@ -392,6 +398,7 @@ async function runGenerateWithRetry(
       includeImages: true,
       saveImages,
       uploadImages,
+      imageAttachment,
     });
     if (fresh.ok) {
       issue = classifyResponse(fresh.value);
@@ -892,8 +899,31 @@ async function main(): Promise<void> {
   const promptFromFlag = valueOf("--prompt");
   if (promptFromFlag) consumedValues.add(promptFromFlag);
 
+  // --input-image <path>: explicit image attachment
+  const inputImageFlag = valueOf("--input-image");
+  if (inputImageFlag) consumedValues.add(inputImageFlag);
+
   const positional = argv.filter((arg) => !arg.startsWith("--") && !consumedValues.has(arg));
-  const prompt = promptFromFlag ?? positional[0] ?? "hi";
+
+  // Auto-detect: if the first positional looks like an image path (known extension),
+  // treat it as the image file and the remaining positionals as the prompt text.
+  // Also handles: nimji "describe this" ./photo.jpg  (image as last positional)
+  const IMAGE_EXTS = /\.(png|jpe?g|webp|gif|svg|bmp|tiff?)$/i;
+  let detectedImagePath: string | undefined = inputImageFlag;
+  let promptPositionals = positional;
+
+  if (!detectedImagePath && positional.length > 0) {
+    const lastArg = positional[positional.length - 1];
+    if (IMAGE_EXTS.test(lastArg ?? "")) {
+      detectedImagePath = lastArg;
+      promptPositionals = positional.slice(0, -1);
+    } else if (IMAGE_EXTS.test(positional[0] ?? "")) {
+      detectedImagePath = positional[0];
+      promptPositionals = positional.slice(1);
+    }
+  }
+
+  const prompt = promptFromFlag ?? promptPositionals[0] ?? "hi";
   const imageMode = hasFlag("--image");
   const saveImagesExplicit = process.argv.includes("--save-images");
   const noSaveImages = process.argv.includes("--no-save-images");
@@ -918,7 +948,7 @@ async function main(): Promise<void> {
     valueOf("--answer-style") ?? process.env.UI_ANSWER_STYLE,
     "boxed",
   );
-  const maxRetries = imageMode ? 2 : 1;
+  const maxRetries = imageMode || Boolean(detectedImagePath) ? 2 : 1;
 
   if (keepalive && mode !== "chat") {
     startKeepaliveInBackground(keepaliveMinutes);
@@ -971,6 +1001,24 @@ async function main(): Promise<void> {
     banner("ok", "session reset");
   }
 
+  // Upload image attachment if provided (either via --input-image or auto-detected path)
+  let imageAttachment: ImageAttachment | undefined;
+  if (detectedImagePath) {
+    const mimeType = inferMimeTypeFromPath(detectedImagePath);
+    if (mimeType === "application/octet-stream") {
+      banner("warn", `${detectedImagePath}: unrecognised image extension, skipping upload`);
+    } else {
+      banner("ok", `uploading image  ${muted(detectedImagePath)}  ${muted(`(${mimeType})`)}`);
+      try {
+        imageAttachment = await uploadImageToGemini(config, detectedImagePath);
+        banner("ok", `image attached  ${muted(imageAttachment.tokenPath.slice(0, 60))}…`);
+      } catch (err) {
+        banner("error", `image upload failed: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+    }
+  }
+
   if (mode === "chat") {
     if (keepalive) {
       client.startKeepalive({
@@ -989,12 +1037,20 @@ async function main(): Promise<void> {
         `  ${muted("images")}  ${accent("auto-save on")} ${muted("(./output-images · --no-save-images to skip)")}`,
       );
     }
+    if (imageAttachment) {
+      banner("ok", `image attached — will be sent with the first message  ${betaPill()}`);
+    }
     const rl = createInterface({ input, output });
+    // Image attachment applies to the first message only; subsequent turns are text-only.
+    let pendingImageAttachment: ImageAttachment | undefined = imageAttachment;
     try {
       while (true) {
         const line = (await rl.question(`${accent("nimji")} ${muted("›")} `)).trim();
         if (!line) continue;
         if (line === "/exit" || line === "/quit") break;
+
+        const turnAttachment = pendingImageAttachment;
+        pendingImageAttachment = undefined; // consume once
 
         const {
           result,
@@ -1011,6 +1067,7 @@ async function main(): Promise<void> {
           noRetry,
           !noSessionRecover,
           maxRetries,
+          turnAttachment,
         );
         if (!result.ok) {
           banner("error", result.error.message);
@@ -1044,6 +1101,11 @@ async function main(): Promise<void> {
     brand("one-shot mode");
     section("Prompt", console.error);
     console.error(`  ${accent(prompt)}`);
+    if (imageAttachment) {
+      console.error(
+        `  ${muted("image")}    ${strong(imageAttachment.fileName)}  ${muted(`(${imageAttachment.mimeType})`)}`,
+      );
+    }
     if (imageMode) banner("ok", "image mode enabled (extra retries)");
     if (imageMode && saveImages && !saveImagesExplicit) {
       banner("ok", "auto-saving images to ./output-images (--no-save-images to skip disk)");
@@ -1057,6 +1119,7 @@ async function main(): Promise<void> {
         noRetry,
         !noSessionRecover,
         maxRetries,
+        imageAttachment,
       );
     if (!result.ok) {
       banner("error", result.error.message);

@@ -6,7 +6,13 @@
 
 export { create, createClient, createClientFromEnv } from "./client.js";
 export { sortStableGoogleImageUrls } from "./parser.js";
-export { IMAGE_PIPELINE_DISABLED, upgradeGgDlUrlsFromRedirects, downloadImages } from "./images.js";
+export {
+  IMAGE_PIPELINE_DISABLED,
+  upgradeGgDlUrlsFromRedirects,
+  downloadImages,
+  uploadImageToGemini,
+  inferMimeTypeFromPath,
+} from "./images.js";
 export {
   loadConfigFromEnv,
   mergeProjectConfigIntoEnv,
@@ -36,6 +42,7 @@ export type {
   GenerateOptions,
   GenerateResult,
   HookContext,
+  ImageAttachment,
   KeepaliveBatchexecuteConfig,
   KeepaliveOptions,
   RequestContext,

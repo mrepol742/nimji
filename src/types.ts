@@ -84,6 +84,19 @@ export type GemaiConfig = {
   readonly keepalive?: KeepaliveBatchexecuteConfig;
 };
 
+/**
+ * An image attached to a generate() call as a Gemini contribution token.
+ * Obtained by calling `uploadImageToGemini` in `images.ts`.
+ */
+export type ImageAttachment = {
+  /** The `/contrib_service/ttl_1d/<token>` path returned by the Gemini upload endpoint. */
+  readonly tokenPath: string;
+  /** MIME type, e.g. `"image/png"`, `"image/jpeg"`. */
+  readonly mimeType: string;
+  /** Original filename used when uploading. */
+  readonly fileName: string;
+};
+
 /** Single `generate()` invocation options. */
 export type GenerateOptions = {
   readonly prompt: string;
@@ -91,6 +104,8 @@ export type GenerateOptions = {
   readonly saveImages?: boolean;
   readonly uploadImages?: boolean;
   readonly imageOutputDir?: string;
+  /** Optional image to attach to the prompt (uploaded via `uploadImageToGemini`). */
+  readonly imageAttachment?: ImageAttachment;
 };
 
 /** HTTP/stream stats copied from the raw Gemini response. */
