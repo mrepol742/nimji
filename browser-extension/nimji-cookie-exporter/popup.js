@@ -1,21 +1,10 @@
 /* global chrome, document, navigator, console */
 
 const statusEl = document.getElementById("status");
-const atTokenStateEl = document.getElementById("atTokenState");
-const fSidStateEl = document.getElementById("fSidState");
 const envOutputEl = document.getElementById("envOutput");
 const refreshBtn = document.getElementById("refreshBtn");
 const copyBtn = document.getElementById("copyBtn");
 const clearBtn = document.getElementById("clearBtn");
-
-const atTokenDot = document.getElementById("atTokenDot");
-const fSidDot = document.getElementById("fSidDot");
-
-function mask(value) {
-  if (!value) return "missing";
-  if (value.length <= 10) return "captured";
-  return `${value.slice(0, 4)}...${value.slice(-4)}`;
-}
 
 function formatLastCapture(ms) {
   if (!ms || !Number.isFinite(ms)) return "never";
@@ -61,29 +50,15 @@ async function refresh() {
     return;
   }
 
-  atTokenStateEl.textContent = mask(result.atToken);
-  fSidStateEl.textContent = mask(result.fSid);
   envOutputEl.value = result.envBlock || "";
 
-  if (result.atToken) {
-    atTokenDot.className = "badge-dot captured";
-  } else {
-    atTokenDot.className = "badge-dot missing";
-  }
-
-  if (result.fSid) {
-    fSidDot.className = "badge-dot captured";
-  } else {
-    fSidDot.className = "badge-dot missing";
-  }
-
   if (result.hasAll) {
-    setStatus(`Ready. Captured all values. Last capture: ${formatLastCapture(result.lastCapturedAt)}`, true);
-  } else {
     setStatus(
-      "Missing tokens. Click here to open or focus gemini.google.com.",
-      false
+      `Ready. Captured all values. Last capture: ${formatLastCapture(result.lastCapturedAt)}`,
+      true,
     );
+  } else {
+    setStatus("Missing tokens. Click here to open or focus gemini.google.com.", false);
   }
 }
 
@@ -116,9 +91,14 @@ statusEl.addEventListener("click", () => {
 });
 
 async function init() {
-  await refresh();
   const result = await requestExport();
-  if (!result || !result.hasAll) {
+  if (!result || !result.ok) {
+    setStatus("Failed to read extension state.", false);
+    await ensureGeminiIsOpen();
+    return;
+  }
+  await refresh();
+  if (!result.hasAll) {
     await ensureGeminiIsOpen();
   }
 }

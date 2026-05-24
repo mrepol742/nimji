@@ -6,7 +6,7 @@ const defaultState = () => ({
   atToken: "",
   fSid: "",
   lastCapturedAt: 0,
-  lastUrl: ""
+  lastUrl: "",
 });
 
 async function readState() {
@@ -19,14 +19,20 @@ async function writeState(next) {
 }
 
 function normalizeForEnv(value) {
-  return String(value || "").replace(/\r?\n/g, "").trim();
+  return String(value || "")
+    .replace(/\r?\n/g, "")
+    .trim();
+}
+
+function shellQuote(value) {
+  return `'${normalizeForEnv(value).replace(/'/g, "'\\''")}'`;
 }
 
 function buildEnvBlock(cookies, atToken, fSid) {
   return [
-    `COOKIES=${normalizeForEnv(cookies)}`,
-    `AT_TOKEN=${normalizeForEnv(atToken)}`,
-    `F_SID=${normalizeForEnv(fSid)}`
+    `COOKIES=${shellQuote(cookies)}`,
+    `AT_TOKEN=${shellQuote(atToken)}`,
+    `F_SID=${shellQuote(fSid)}`,
   ].join("\n");
 }
 
@@ -60,7 +66,7 @@ function parseStreamRequest(details) {
       atToken,
       fSid,
       lastUrl: details.url,
-      lastCapturedAt: Date.now()
+      lastCapturedAt: Date.now(),
     };
   } catch {
     return null;
@@ -76,7 +82,7 @@ async function updateFromRequest(details) {
     atToken: parsed.atToken || current.atToken,
     fSid: parsed.fSid || current.fSid,
     lastCapturedAt: parsed.lastCapturedAt,
-    lastUrl: parsed.lastUrl
+    lastUrl: parsed.lastUrl,
   };
 
   await writeState(next);
@@ -89,10 +95,10 @@ chrome.webRequest.onBeforeRequest.addListener(
   {
     urls: [
       "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate*",
-      "https://gemini.google.com/_/BardChatUi/data/batchexecute*"
-    ]
+      "https://gemini.google.com/_/BardChatUi/data/batchexecute*",
+    ],
   },
-  ["requestBody"]
+  ["requestBody"],
 );
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -120,7 +126,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         envBlock,
         hasAll: Boolean(cookies && atToken && fSid),
         lastCapturedAt: state.lastCapturedAt,
-        lastUrl: state.lastUrl
+        lastUrl: state.lastUrl,
       });
     })();
     return true;
